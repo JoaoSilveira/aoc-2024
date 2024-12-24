@@ -1,9 +1,12 @@
 const std = @import("std");
 
 const TileType = enum {
+    robot,
     wall,
     box,
     empty,
+    box_left,
+    box_right,
 };
 
 const Position = struct {
@@ -24,10 +27,63 @@ const Map = struct {
             const off_pos = self.posAtOffset(pos, direction, offset) orelse return null;
 
             switch (self.tileAtPos(off_pos) orelse unreachable) {
+                .robot => unreachable,
                 .wall => return null,
-                .box => continue,
+                .box => {},
                 .empty => return off_pos,
+                .box_left, .box_right => |wall| {
+                    const other_wall_dir: Movement = if (wall == .box_left) .right else .left;
+                    switch (direction) {
+                        .up, .down => {
+                            if (self.posAtOffset(off_pos, other_wall_dir, 1)) |right| {
+                                _ = self.nextEmptyPos(right, direction) orelse return null;
+                            }
+                        },
+                        else => {},
+                    }
+                },
             }
+        }
+    }
+
+    pub fn moveThing(self: *@This(), pos: Position, direction: Movement) !void {
+        switch (self.tileAtPos(pos) orelse return error.InvalidMap) {
+            .empty => return,
+            .wall => return error.InvalidMoveAttempt,
+            .robot => {
+                const next_pos = self.posAtOffset(pos, direction, 1) orelse return error.InvalidMap;
+                try self.moveThing(next_pos, direction);
+                try self.swapTile(pos, next_pos);
+            },
+            .box => {
+                const next_pos = self.posAtOffset(pos, direction, 1) orelse return error.InvalidMap;
+                try self.moveThing(next_pos, direction);
+                try self.swapTile(pos, next_pos);
+            },
+            .box_left, .box_right => |box| {
+                switch (direction) {
+                    .up, .down => {
+                        const other_dir: Movement = if (box == .box_left) .right else .left;
+
+                        const next_pos = self.posAtOffset(pos, direction, 1) orelse return error.InvalidMap;
+                        const other_pos = self.posAtOffset(next_pos, other_dir, 1) orelse return error.invalidMap;
+
+                        try self.moveThing(next_pos, direction);
+                        try self.moveThing(other_pos, direction);
+
+                        try self.swapTile(pos, next_pos);
+                        try self.swapTile(
+                            self.posAtOffset(pos, other_dir, 1) orelse return error.InvalidMap,
+                            other_pos,
+                        );
+                    },
+                    else => {
+                        const next_pos = self.posAtOffset(pos, direction, 1) orelse return error.InvalidMap;
+                        try self.moveThing(next_pos, direction);
+                        try self.swapTile(pos, next_pos);
+                    },
+                }
+            },
         }
     }
 
@@ -38,7 +94,25 @@ const Map = struct {
 
             switch (self.tileAtPos(box_pos) orelse unreachable) {
                 .empty => return,
+                .robot => {
+                    self.swapTile(empty_pos, box_pos) catch unreachable;
+                    return;
+                },
                 .box => {
+                    self.swapTile(empty_pos, box_pos) catch unreachable;
+                    empty_pos = box_pos;
+                },
+                .box_left, .box_right => |box| {
+                    const other_dir: Movement = if (box == .box_left) .right else .left;
+                    switch (direction) {
+                        .up, .down => {
+                            self.swapTile(
+                                self.posAtOffset(box_pos, other_dir, 1) orelse unreachable,
+                                self.posAtOffset(empty_pos, other_dir, 1) orelse unreachable,
+                            ) catch unreachable;
+                        },
+                        else => {},
+                    }
                     self.swapTile(empty_pos, box_pos) catch unreachable;
                     empty_pos = box_pos;
                 },
@@ -85,9 +159,12 @@ const Map = struct {
             while (c < self.columns) : (c += 1) {
                 const pos = Position{ .x = c, .y = l };
                 const char: u8 = switch (self.tileAtPos(pos).?) {
+                    .robot => '@',
                     .wall => '#',
                     .empty => '.',
                     .box => 'O',
+                    .box_left => '[',
+                    .box_right => ']',
                 };
                 std.debug.print(
                     "{c}",
@@ -173,7 +250,8 @@ const InputData = struct {
         for (line) |c| {
             try map.append(switch (c) {
                 '#' => .wall,
-                '.', '@' => .empty,
+                '@' => .robot,
+                '.' => .empty,
                 'O' => .box,
                 else => return error.InvalidMapChar,
             });
@@ -254,13 +332,78 @@ fn firstHalf(input: *InputData) !void {
     std.debug.print("coords: {d}\n", .{total_coords});
 }
 
+fn doubleMap(input_map: []TileType, double_map: []TileType) void {
+    for (input_map, 0..) |tile, i| {
+        switch (tile) {
+            .wall => {
+                double_map[i * 2] = .wall;
+                double_map[i * 2 + 1] = .wall;
+            },
+            .empty => {
+                double_map[i * 2] = .empty;
+                double_map[i * 2 + 1] = .empty;
+            },
+            .box => {
+                double_map[i * 2] = .box_left;
+                double_map[i * 2 + 1] = .box_right;
+            },
+            .robot => {
+                double_map[i * 2] = .robot;
+                double_map[i * 2 + 1] = .empty;
+            },
+            .box_left, .box_right => unreachable,
+        }
+    }
+}
+
 fn secondHalf(input: *InputData) !void {
-    _ = input;
+    var map = Map{
+        .lines = input.map.lines,
+        .columns = input.map.columns * 2,
+        .tiles = try input.alloc.alloc(TileType, input.map.tiles.len * 2),
+    };
+
+    doubleMap(input.map.tiles, map.tiles);
+    input.robot_position.x *= 2;
+
+    for (input.moves) |move| {
+        const empty_pos = map.nextEmptyPos(input.robot_position, move);
+
+        // std.debug.print("robot: {any}\n", .{input.robot_position});
+        // std.debug.print("{any} {?any}\n", .{ move, empty_pos });
+
+        if (empty_pos) |_| {
+            try map.moveThing(input.robot_position, move);
+            input.robot_position = map.posAtOffset(
+                input.robot_position,
+                move,
+                1,
+            ) orelse return error.InvalidRobotMovement;
+
+            // map.print();
+            // std.debug.print("\n", .{});
+        }
+    }
+
+    map.print();
+    std.debug.print("\n", .{});
+    var total_coords: u64 = 0;
+    for (map.tiles, 0..) |tile, offset| {
+        if (tile != .box_left)
+            continue;
+
+        const x = offset % map.columns;
+        const y = @divTrunc(offset, map.columns);
+
+        total_coords += y * 100 + x;
+    }
+
+    std.debug.print("coords: {d}\n", .{total_coords});
 }
 
 pub fn execute() !void {
     var input_data = try InputData.parse(std.heap.page_allocator, "data/day-15.txt");
     defer input_data.deinit();
 
-    try firstHalf(&input_data);
+    try secondHalf(&input_data);
 }
