@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const exercise = @import("./day-16.zig");
+const exercise = @import("./day-17.zig");
 
 pub fn main() void {
     exercise.execute() catch |err| {
